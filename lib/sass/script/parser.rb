@@ -222,16 +222,8 @@ module Sass
         def production(name, sub, *ops)
           class_eval <<RUBY, __FILE__, __LINE__ + 1
             def #{name}
-              interp = try_ops_after_interp(#{ops.inspect}, #{name.inspect})
-              return interp if interp
               return unless e = #{sub}
               while tok = try_toks(#{ops.map {|o| o.inspect}.join(', ')})
-                if interp = try_op_before_interp(tok, e)
-                  other_interp = try_ops_after_interp(#{ops.inspect}, #{name.inspect}, interp)
-                  return interp unless other_interp
-                  return other_interp
-                end
-
                 e = node(Tree::Operation.new(e, assert_expr(#{sub.inspect}), tok.type),
                          e.source_range.start_pos)
               end
@@ -244,8 +236,6 @@ RUBY
           class_eval <<RUBY, __FILE__, __LINE__ + 1
             def unary_#{op}
               return #{sub} unless tok = try_tok(:#{op})
-              interp = try_op_before_interp(tok)
-              return interp if interp
               start_pos = source_position
               node(Tree::UnaryOperation.new(assert_expr(:unary_#{op}), :#{op}), start_pos)
             end
@@ -268,7 +258,7 @@ RUBY
 
       def map
         start_pos = source_position
-        e = interpolation
+        e = space
         return unless e
         return list e, start_pos unless @lexer.peek && @lexer.peek.type == :colon
 
@@ -283,14 +273,14 @@ RUBY
       end
 
       def map_pair(key = nil)
-        return unless key ||= interpolation
+        return unless key ||= space
         assert_tok :colon
-        return key, assert_expr(:interpolation)
+        return key, assert_expr(:space)
       end
 
       def expr
         start_pos = source_position
-        e = interpolation
+        e = space
         return unless e
         list e, start_pos
       end
@@ -300,62 +290,14 @@ RUBY
 
         list = node(Sass::Script::Tree::ListLiteral.new([first], :comma), start_pos)
         while (tok = try_tok(:comma))
-          element_before_interp = list.elements.length == 1 ? list.elements.first : list
-          if (interp = try_op_before_interp(tok, element_before_interp))
-            other_interp = try_ops_after_interp([:comma], :expr, interp)
-            return interp unless other_interp
-            return other_interp
-          end
-          return list unless (e = interpolation)
+          return list unless (e = space)
           list.elements << e
           list.source_range.end_pos = list.elements.last.source_range.end_pos
         end
         list
       end
 
-      production :equals, :interpolation, :single_eq
-
-      def try_op_before_interp(op, prev = nil)
-        return unless @lexer.peek && @lexer.peek.type == :begin_interpolation
-        wb = @lexer.whitespace?(op)
-        str = literal_node(Script::Value::String.new(Lexer::OPERATORS_REVERSE[op.type]),
-                           op.source_range)
-        interp = node(
-          Script::Tree::Interpolation.new(prev, str, nil, wb, !:wa, :originally_text),
-          (prev || str).source_range.start_pos)
-        interpolation(interp)
-      end
-
-      def try_ops_after_interp(ops, name, prev = nil)
-        return unless @lexer.after_interpolation?
-        op = try_toks(*ops)
-        return unless op
-        interp = try_op_before_interp(op, prev)
-        return interp if interp
-
-        wa = @lexer.whitespace?
-        str = literal_node(Script::Value::String.new(Lexer::OPERATORS_REVERSE[op.type]),
-                           op.source_range)
-        str.line = @lexer.line
-        interp = node(
-          Script::Tree::Interpolation.new(prev, str, assert_expr(name), !:wb, wa, :originally_text),
-          (prev || str).source_range.start_pos)
-        interp
-      end
-
-      def interpolation(first = space)
-        e = first
-        while (interp = try_tok(:begin_interpolation))
-          wb = @lexer.whitespace?(interp)
-          mid = assert_expr :expr
-          assert_tok :end_interpolation
-          wa = @lexer.whitespace?
-          e = node(
-            Script::Tree::Interpolation.new(e, mid, space, wb, wa),
-            (e || mid).source_range.start_pos)
-        end
-        e
-      end
+      production :equals, :space, :single_eq
 
       def space
         start_pos = source_position
@@ -382,7 +324,17 @@ RUBY
       unary :plus, :unary_minus
       unary :minus, :unary_div
       unary :div, :unary_not # For strings, so /foo/bar works
-      unary :not, :ident
+      unary :not, :interpolation
+
+      def interpolation
+        return ident unless (tok = try_tok(:begin_interpolation))
+
+        contents = assert_expr :expr
+        assert_tok :end_interpolation
+        node(
+          Script::Tree::Interpolation.new(nil, contents, nil, false, false),
+          tok.source_range.start_pos)
+      end
 
       def ident
         return funcall unless @lexer.peek && @lexer.peek.type == :ident
@@ -447,7 +399,7 @@ RUBY
       end
 
       def mixin_arglist
-        arglist(:interpolation, "mixin argument")
+        arglist(:space, "mixin argument")
       end
 
       def arglist(subexpr, description)
