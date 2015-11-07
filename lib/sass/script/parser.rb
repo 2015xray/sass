@@ -324,33 +324,44 @@ RUBY
       unary :plus, :unary_minus
       unary :minus, :unary_div
       unary :div, :unary_not # For strings, so /foo/bar works
-      unary :not, :interpolation
-
-      def interpolation
-        return ident unless (tok = try_tok(:begin_interpolation))
-
-        contents = assert_expr :expr
-        assert_tok :end_interpolation
-        node(
-          Script::Tree::Interpolation.new(nil, contents, nil, false, false),
-          tok.source_range.start_pos)
-      end
+      unary :not, :ident
 
       def ident
-        return funcall unless @lexer.peek && @lexer.peek.type == :ident
-        return if @stop_at && @stop_at.include?(@lexer.peek.value)
+        return unless first = @lexer.peek
+        if first.type == :ident
+          return if @stop_at && @stop_at.include?(first.value)
+        elsif first.type != :begin_interpolation
+          return funcall
+        end
 
-        name = @lexer.next
-        if (color = Sass::Script::Value::Color::COLOR_NAMES[name.value.downcase])
-          literal_node(Sass::Script::Value::Color.new(color, name.value), name.source_range)
-        elsif name.value == "true"
-          literal_node(Sass::Script::Value::Bool.new(true), name.source_range)
-        elsif name.value == "false"
-          literal_node(Sass::Script::Value::Bool.new(false), name.source_range)
-        elsif name.value == "null"
-          literal_node(Sass::Script::Value::Null.new, name.source_range)
+        contents = []
+        while (tok = @lexer.peek)
+          if tok.type == :ident
+            contents << @lexer.next.value
+            next
+          end
+
+          break unless try_tok(:begin_interpolation)
+          contents << assert_expr(:expr)
+          assert_tok :end_interpolation
+        end
+
+        if contents.length > 1 || contents.first.is_a?(Sass::Script::Tree::Node)
+          return Sass::Script::Tree::StringInterpolation.new(contents, :identifier)
+        end
+
+        if (color = Sass::Script::Value::Color::COLOR_NAMES[first.value.downcase])
+          literal_node(Sass::Script::Value::Color.new(color, first.value), first.source_range)
+        elsif first.value == "true"
+          literal_node(Sass::Script::Value::Bool.new(true), first.source_range)
+        elsif first.value == "false"
+          literal_node(Sass::Script::Value::Bool.new(false), first.source_range)
+        elsif first.value == "null"
+          literal_node(Sass::Script::Value::Null.new, first.source_range)
         else
-          literal_node(Sass::Script::Value::String.new(name.value, :identifier), name.source_range)
+          literal_node(
+            Sass::Script::Value::String.new(first.value, :identifier),
+            first.source_range)
         end
       end
 
@@ -449,13 +460,21 @@ RUBY
       def special_fun
         first = try_tok(:special_fun)
         return paren unless first
-        str = literal_node(first.value, first.source_range)
-        return str unless try_tok(:string_interpolation)
-        mid = assert_expr :expr
-        assert_tok :end_interpolation
-        last = assert_expr(:special_fun)
-        node(Tree::Interpolation.new(str, mid, last, false, false),
-            first.source_range.start_pos)
+
+        unless unless try_tok(:string_interpolation)
+          return literal_node(first.value, first.source_range)
+        end
+
+        contents = [first.value.value]
+        begin
+          contents << assert_expr(:expr)
+          assert_tok :end_interpolation
+          contents << assert_tok(:special_fun).value.value
+        end while try_tok(:string_interpolation)
+
+        node(
+          Tree::StringInterpolation.new(contents, :identifier),
+          first.source_range.start_pos)
       end
 
       def paren
@@ -491,7 +510,7 @@ RUBY
         end while try_tok(:string_interpolation)
 
         node(
-          Tree::StringInterpolation.new(contents, first.value.type),
+          Tree::StringInterpolation.new(contents),
           first.source_range.start_pos)
       end
 
